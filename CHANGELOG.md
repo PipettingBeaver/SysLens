@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - GitHub Actions now use Node 24 runtimes (`actions/checkout@v7`,
   `softprops/action-gh-release@v3`), clearing the Node 20 deprecation warning.
+- CI pins `ubuntu-24.04` instead of `ubuntu-latest`, matching the release job.
 
 ## [0.4.0] - 2026-11-14
 
