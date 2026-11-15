@@ -1,0 +1,17 @@
+[Unit]
+Description=SysLens VRAM/RAM guard
+Documentation=https://github.com/PipettingBeaver/SysLens#readme
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/syslens --headless-guard --reserve-mb 2048
+Restart=on-failure
+RestartSec=5
+Nice=10
+IOSchedulingClass=idle
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

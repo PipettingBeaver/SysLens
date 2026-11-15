@@ -1,0 +1,31 @@
+SysLens 0.3.0 snapshot 22:04:40  opsikion-cachyos  (16 cores)
+CPU    42.2%  load 2.63 2.00 2.00
+RAM   11.5GB / 15.6GB  available 4.0GB
+SWAP  10.9GB / 15.6GB (70%)  zram 10.3GB -> 2.9GB
+GPU   NVIDIA GeForce RTX 3060  VRAM 4010 / 12288 MiB (free 7888, reserve 2048)  util 15%  46C  unaccounted 1932 MiB
+NVKMS failures (15m) 0
+
+UNIT                             PROCS       RSS      VRAM    CPU%  FLAGS
+app:handy_0.9.8_amd64                6   475.3MB   805 MiB     0.0  
+app:discord#b87eb7dd                 7   294.7MB   792 MiB     9.9  
+app:opencode-desktop-linux-x86_…     7   718.7MB   247 MiB   109.3  
+plasma-kwin_wayland                  3   920.4MB   234 MiB     9.9  COMP
+app:firefox                         28     4.1GB         -     0.0  
+app:discord#10855                    3   805.0MB         -    59.6  
+plasma-plasmashell                   1   711.3MB         -     0.0  DESKTOP
+app:ai.opencode.desktop             32   633.7MB         -    19.9  SELF
+app:flatpak-org.nicotine_plus.N…     6   341.7MB         -     0.0  
+docker:immich_server                 3   264.6MB         -     0.0  CONTAINER
+docker:homeassistant                 9   236.1MB         -     0.0  CONTAINER
+containerd                          19   180.4MB         -   109.3  SYSTEM
+app:com.github.wwmm.easyeffects      1   144.4MB         -    19.9  
+docker:audiomuse-postgres           14   144.0MB         -     0.0  CONTAINER
+plasma-xdg-desktop-portal-kde        1   140.1MB         -     0.0  DESKTOP
+app:com.mitchellh.ghostty            1   127.2MB         -    29.8  
+app:flatpak-md.obsidian.Obsidia…    12   110.4MB         -     0.0  
+docker:n8n                           3   110.2MB         -     0.0  CONTAINER
+app:app.unisic.Unisic                1   107.2MB         -     0.0  
+docker:audiomuse-ai-worker-inst…     6    99.6MB         -     0.0  CONTAINER
+
+Warnings
+  [INFO] 1.9GB VRAM is held outside visible processes (driver/context overhead)

@@ -1,0 +1,25 @@
+[package]
+name = "syslens"
+version = "0.3.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Lightweight per-unit CPU, RAM and VRAM monitor with systemd user controls"
+license = "MIT"
+repository = "https://github.com/PipettingBeaver/SysLens"
+homepage = "https://github.com/PipettingBeaver/SysLens"
+readme = "README.md"
+keywords = ["monitor", "systemd", "vram", "tui", "linux"]
+categories = ["command-line-utilities", "system"]
+authors = ["PipettingBeaver"]
+
+[dependencies]
+ratatui = "0.30"
+crossterm = "0.29"
+libc = "0.2"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
