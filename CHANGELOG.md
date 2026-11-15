@@ -7,17 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-15
+
+### Added
+
+- Static musl release builds for `x86_64` and `aarch64`, so the binaries run on
+  older distros without a glibc version dependency and on ARM hosts.
+- `SECURITY.md` with a private vulnerability reporting path.
+- A `main` branch ruleset requiring a pull request and the `test` and `msrv`
+  checks, and blocking force-pushes and deletion.
+- Dependabot version updates for Cargo and GitHub Actions, with Dependabot
+  security updates and alerts enabled.
+- A `musl` CI job that builds and verifies static binaries on both working
+  architectures.
+
 ### Changed
 
 - GitHub Actions now use Node 24 runtimes (`actions/checkout@v7`,
   `softprops/action-gh-release@v3`), clearing the Node 20 deprecation warning.
+- Actions are pinned by commit SHA in CI and release workflows.
 - CI pins `ubuntu-24.04` instead of `ubuntu-latest`, matching the release job.
 - CI uses a read-only token, cancels superseded runs, has a timeout, builds
   with `--locked`, and adds an MSRV job for the declared Rust 1.88.
 - Release runs the test suite before publishing.
-- Added Dependabot version updates for Cargo and GitHub Actions. The MSRV job
-  passes `toolchain: 1.88.0` as an input so Dependabot does not treat it as an
-  action version bump.
+- The MSRV job passes `toolchain: 1.88.0` as an input so Dependabot does not
+  treat it as an action version bump.
 
 ## [0.4.0] - 2026-11-14
 

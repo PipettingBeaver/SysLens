@@ -1,33 +1,33 @@
-SysLens 0.4.0 snapshot 22:59:11  opsikion-cachyos  (16 cores)
-CPU    54.2%  load 6.34 5.07 3.40
-RAM   12.9GB / 15.6GB  available 2.6GB
-SWAP  14.4GB / 15.6GB (93%)  zram 13.7GB -> 3.9GB
-GPU   NVIDIA GeForce RTX 3060  VRAM 3287 / 12288 MiB (free 8611, reserve 2048)  util 44%  43C  unaccounted 2053 MiB
+SysLens 0.4.1 snapshot 02:31:02  opsikion-cachyos  (16 cores)
+CPU    79.4%  load 6.47 4.27 3.58
+RAM   11.8GB / 15.6GB  available 3.7GB
+SWAP  11.4GB / 15.6GB (74%)  zram 10.9GB -> 3.9GB
+GPU   NVIDIA GeForce RTX 3060  VRAM 8925 / 12288 MiB (free 2973, reserve 2048)  util 95%  61C  unaccounted 1749 MiB
 GPU alloc failures (15m) 0
 
 UNIT                             PROCS       RSS      VRAM    CPU%  FLAGS
-app:discord#b87eb7dd                 7   253.2MB   560 MiB     0.0  
-app:opencode-desktop-linux-x86_…     7   699.9MB   271 MiB    76.5  
-plasma-kwin_wayland                  3   680.5MB   257 MiB    25.5  COMP
-app:discord#10855                    3   823.9MB   146 MiB    51.0  
-app:firefox                         40     6.9GB         -    95.6  
-plasma-plasmashell                   1   642.6MB         -     0.0  DESKTOP
-app:ai.opencode.desktop             35   620.0MB         -     6.4  SELF
-docker:homeassistant                 9   224.7MB         -     0.0  CONTAINER
-app:com.mitchellh.ghostty            1   167.5MB         -    31.9  
-containerd                          19   167.0MB         -    95.6  SYSTEM
-app:com.github.wwmm.easyeffects      1   136.3MB         -    25.5  
-docker:immich_server                 3   117.8MB         -     0.0  CONTAINER
-app:flatpak-org.nicotine_plus.N…     6   106.3MB         -     0.0  
-app:app.unisic.Unisic                1   106.0MB         -     0.0  
-plasma-xdg-desktop-portal-kde        1   105.9MB         -     0.0  DESKTOP
-docker:n8n                           3    82.4MB         -     0.0  CONTAINER
-plasma-krunner                       1    78.6MB         -     0.0  DESKTOP
-docker                               9    73.3MB         -    82.9  SYSTEM
-copyq                                2    58.7MB         -     0.0  
-app:handy_0.9.8_amd64                5    53.2MB         -     0.0  
+ollama                               2   842.2MB  4676 MiB   388.5  MODEL, SYSTEM
+app:discord#b87eb7dd                 7   243.1MB  1092 MiB     0.0  
+app:handy_0.9.8_amd64                6   225.7MB   836 MiB     0.0  
+app:opencode-desktop-linux-x86_…     7   723.3MB   257 MiB    29.2  
+plasma-kwin_wayland                  3   703.5MB   211 MiB    20.9  COMP
+app:discord#10855                    3   601.1MB   104 MiB     0.0  
+app:firefox                         22     3.2GB         -   183.8  
+app:ai.opencode.desktop             43   764.6MB         -    12.5  SELF
+plasma-plasmashell                   1   693.7MB         -     0.0  DESKTOP
+docker:b550c6a799ef                  9   205.1MB         -     0.0  CONTAINER
+app:com.mitchellh.ghostty            1   176.0MB         -    20.9  
+containerd                          19   147.3MB         -    71.0  SYSTEM
+app:com.github.wwmm.easyeffects      1   130.3MB         -    25.1  
+docker:3b3ac5f1b331                  3   114.0MB         -     0.0  CONTAINER
+plasma-xdg-desktop-portal-kde        1   101.0MB         -     0.0  DESKTOP
+app:app.unisic.Unisic                1   100.2MB         -     0.0  
+docker:b7e57f4d05ed                 14    98.4MB         -     0.0  CONTAINER
+app:flatpak-org.nicotine_plus.N…     6    85.1MB         -     4.2  
+docker:f927276bb01d                  3    77.4MB         -     0.0  CONTAINER
+docker                               9    74.4MB         -    62.7  SYSTEM
 
 Warnings
-  [CRIT] Swap 93% used (14.4GB of 15.6GB)
-  [WARN] Low available RAM: 2.6GB
-  [INFO] 2.0GB VRAM is held outside visible processes (driver/context overhead)
+  [WARN] GPU VRAM headroom 2973 MiB is close to the 2048 MiB compositor reserve
+  [WARN] Swap pressure: 74% used
+  [INFO] 1.7GB VRAM is held outside visible processes (driver/context overhead)

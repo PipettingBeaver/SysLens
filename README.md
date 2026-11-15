@@ -102,12 +102,21 @@ Requirements:
   names
 - A systemd **user** session (the TUI controls `systemctl --user`)
 
-From a release tarball:
+From a release tarball (static musl builds, no glibc dependency):
+
+```text
+syslens-<version>-x86_64-unknown-linux-musl.tar.gz
+syslens-<version>-aarch64-unknown-linux-musl.tar.gz
+```
 
 ```sh
-tar xzf syslens-0.4.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf syslens-<version>-<target>.tar.gz
 install -Dm755 syslens ~/.local/bin/syslens
 ```
+
+The static binary runs on any Linux with a reasonably modern kernel, including
+distros older than the build host. Check with `file syslens` (it should report
+`statically linked`).
 
 From source:
 
@@ -326,6 +335,8 @@ Destructive actions (`stop`, force kill) ask for confirmation before running.
 - Freezing does not free memory (see the guard section).
 - Live state only: there is no history, graphing, persistence or remote
   monitoring, and SysLens opens no network socket.
+- Release binaries cover x86_64 and aarch64 only; other architectures build from
+  source.
 
 **Alternatives**
 
@@ -343,6 +354,10 @@ Destructive actions (`stop`, force kill) ask for confirmation before running.
   network.
 - Non-systemd distributions (runit, OpenRC, s6): SysLens cannot resolve units;
   use `htop`, `btop`, or cgroupfs tooling instead.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for how to report a vulnerability.
 
 ## License
 

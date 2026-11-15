@@ -1,6 +1,6 @@
 [package]
 name = "syslens"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.88"
 description = "Lightweight per-unit CPU, RAM and VRAM monitor with systemd user controls"

@@ -19,3 +19,6 @@ updates:
       actions-minor-patch:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+    ignore:
+      # Pinned to the stable branch; the Rust version comes from `toolchain:`.
+      - dependency-name: "dtolnay/rust-toolchain"
