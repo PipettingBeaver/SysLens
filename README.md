@@ -6,8 +6,8 @@ are crowding your GPU or memory.
 
 It is built for small VRAM budgets (for example a 12 GB card that also drives the
 desktop): it shows which *unit* owns the VRAM, warns before the compositor runs
-out, and can automatically freeze the largest model backend before the desktop
-starts flickering.
+out, and in my specific use-case was to help automatically freeze the largest model backend before the desktop
+starts flickering from VRAM allocation issues while learning to manage optimization.
 
 <img width="1630" height="1053" alt="image" src="https://github.com/user-attachments/assets/aff491a5-62a7-431a-8f88-ab7adfbc7f36" />
 
