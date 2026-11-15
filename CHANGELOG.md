@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - GitHub Actions now use Node 24 runtimes (`actions/checkout@v7`,
   `softprops/action-gh-release@v3`), clearing the Node 20 deprecation warning.
 - CI pins `ubuntu-24.04` instead of `ubuntu-latest`, matching the release job.
+- CI uses a read-only token, cancels superseded runs, has a timeout, builds
+  with `--locked`, and adds an MSRV job for the declared Rust 1.88.
+- Release runs the test suite before publishing.
+- Added Dependabot version updates for Cargo and GitHub Actions.
 
 ## [0.4.0] - 2026-11-14
 
