@@ -12,7 +12,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --release
@@ -26,7 +26,7 @@ jobs:
           cp -r systemd docs "dist/$name"/
           tar -C dist -czf "dist/$name.tar.gz" "$name"
           ( cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256" )
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/syslens-*.tar.gz
