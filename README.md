@@ -6,32 +6,22 @@ groups that are crowding your GPU or memory, and a guard that does it for you.
 
 It is built for small VRAM budgets (for example a 12 GB card that also drives
 the desktop): it shows which *unit* owns the VRAM, warns before the compositor
-runs out, and can freeze the largest idle model backend before the desktop
-starts flickering.
+runs out, and in my specific use-case was to help automatically freeze the
+largest model backend before the desktop starts flickering from VRAM allocation
+issues while learning to manage optimization.
 
 It works without a vendor-specific agent: GPU memory is read from `nvidia-smi`
 when present, otherwise from sysfs VRAM counters (amdgpu) and DRM `fdinfo`,
 which also attributes per-process VRAM on amdgpu, i915, xe and other DRM
 drivers.
 
-```text
-SysLens 0.4.0 snapshot 09:14:02  workstation  (16 cores)
-CPU    42.2%  load 2.63 2.00 2.00
-RAM   11.5GB / 15.6GB  available 4.0GB
-SWAP  10.9GB / 15.6GB (70%)  zram 10.3GB -> 2.9GB
-GPU   NVIDIA GeForce RTX 3060  VRAM 4010 / 12288 MiB (free 7888, reserve 2048)  util 15%  46C  unaccounted 1932 MiB
-GPU alloc failures (15m) 0
+<img width="1630" height="1053" alt="image" src="https://github.com/user-attachments/assets/aff491a5-62a7-431a-8f88-ab7adfbc7f36" />
 
-UNIT                             PROCS       RSS      VRAM    CPU%  FLAGS
-app:discord#b87eb7dd                 7   287.7MB   533 MiB     7.7
-app:opencode-desktop                 7   665.8MB   263 MiB    61.2  SELF
-plasma-kwin_wayland                  3   726.6MB   257 MiB    23.0  COMP
-app:firefox                         33     5.0GB         -    61.2
-plasma-plasmashell                   1   841.4MB         -     0.0  DESKTOP
-docker:homeassistant                 9   228.7MB         -     0.0  CONTAINER
-```
 
 ## Why
+
+This was made specifically for helping monitor stuff all in one place for
+multiple projects at once on limited hardware.
 
 Existing monitors show per-process numbers. On a systemd desktop the useful unit
 is the *service or app scope*, and the useful action is `systemctl freeze` /
