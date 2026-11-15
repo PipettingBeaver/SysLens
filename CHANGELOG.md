@@ -15,7 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI uses a read-only token, cancels superseded runs, has a timeout, builds
   with `--locked`, and adds an MSRV job for the declared Rust 1.88.
 - Release runs the test suite before publishing.
-- Added Dependabot version updates for Cargo and GitHub Actions.
+- Added Dependabot version updates for Cargo and GitHub Actions. The MSRV job
+  passes `toolchain: 1.88.0` as an input so Dependabot does not treat it as an
+  action version bump.
 
 ## [0.4.0] - 2026-11-14
 
