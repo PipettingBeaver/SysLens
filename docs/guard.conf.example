@@ -1,0 +1,60 @@
+# SysLens guard configuration.
+#
+# Copy to ~/.config/syslens/guard.conf (or pass --guard-config PATH).
+# Plain `key = value` lines; `#` starts a comment; lists are comma separated.
+# Unknown keys and malformed values are rejected with the line number.
+
+# --- timing (seconds) ------------------------------------------------------
+# Critical pressure must persist this long before the first freeze.
+sustain = 3
+# After a freeze, critical pressure this long leads to a stop (frees memory).
+grace = 60
+# Normal pressure this long thaws a unit the guard froze.
+recover = 10
+# Minimum time between two guard freezes.
+cooldown = 120
+
+# --- candidate gating ------------------------------------------------------
+# Units at or above this CPU percent are treated as busy and skipped.
+busy_cpu = 50
+# If true, busy units may be frozen, but idle units are still preferred.
+allow_busy = false
+
+# --- pressure thresholds ---------------------------------------------------
+# RAM in MiB.
+ram_critical_mib = 1536
+ram_warn_mib = 3072
+# Swap in percent.
+swap_critical_pct = 85
+swap_warn_pct = 70
+# /proc/pressure/memory `some avg10` in percent.
+psi_critical = 60
+psi_warn = 20
+
+# --- kernel log ------------------------------------------------------------
+# Regex passed to `journalctl -g` for GPU allocation failures. The default
+# covers NVIDIA NVKMS, GEM allocation failures, and amdgpu/i915/xe/drm errors.
+# Set this for drivers whose messages differ.
+# gpu_log_pattern = NVKMS|GEM object|failed to allocate
+
+# --- hints -----------------------------------------------------------------
+# Matching is by whole tokens: `tts` does not match `kttsd`. A trailing run of
+# digits is allowed on the last token, so `kded` matches `kded5`.
+#
+# Extend the built-in model list (llama, ollama, whisper, tts, embed, ...).
+# model_hints_add = mychat, mygen
+#
+# Replace the built-in model list entirely.
+# model_hints_only = ollama, mychat
+#
+# Always-protected units (added to compositor/desktop protection).
+# protect_hints_add = my-compositor
+#
+# Units treated as system services.
+# system_hints_add = my-daemon
+
+# --- eligibility overrides -------------------------------------------------
+# Units or hint tokens the guard may always act on, even without a model hint.
+# allow = my-engine.service
+# Units or hint tokens the guard never touches.
+# deny = someapp

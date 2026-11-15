@@ -4,6 +4,10 @@ use std::time::{Duration, Instant};
 
 use crate::util::one_line;
 
+const ACTION_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_UNIT_LEN: usize = 255;
+const UNIT_SUFFIXES: [&str; 3] = [".service", ".scope", ".slice"];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Freeze,
@@ -55,76 +59,108 @@ impl Action {
             Action::Kill => "killed",
         }
     }
+
+    /// systemctl arguments for this action, before the unit name.
+    fn systemctl_args(self) -> &'static [&'static str] {
+        match self {
+            Action::Freeze => &["freeze"],
+            Action::Thaw => &["thaw"],
+            Action::Stop => &["stop"],
+            Action::Start => &["start"],
+            Action::Kill => &["kill", "--signal=SIGKILL"],
+        }
+    }
 }
 
-fn command_for(system: bool) -> Command {
-    if system {
-        if unsafe { libc::geteuid() } == 0 {
-            Command::new("systemctl")
-        } else {
-            let mut command = Command::new("sudo");
-            command.arg("-n").arg("systemctl");
-            command
-        }
+/// Reject anything that is not a plausible systemd unit name before it reaches
+/// a process argument list. Allowed characters follow systemd's unit-name
+/// grammar (escapes such as `\x2d` use a backslash), and the unit must carry a
+/// suffix we act on, so placeholders like `kernel` or `-` are refused too.
+pub fn validate_unit(unit: &str) -> Result<(), String> {
+    if unit.is_empty() || unit.len() > MAX_UNIT_LEN {
+        return Err(format!("refusing unit name of length {}", unit.len()));
+    }
+    if unit.starts_with('-') {
+        return Err(format!("refusing unit name that starts with '-': {unit}"));
+    }
+    let allowed = unit.bytes().all(|b| {
+        b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'@' | b'\\')
+    });
+    if !allowed {
+        return Err(format!(
+            "refusing unit name with unsafe characters: {unit:?}"
+        ));
+    }
+    if !UNIT_SUFFIXES.iter().any(|suffix| unit.ends_with(suffix)) {
+        return Err(format!("refusing non-unit name: {unit}"));
+    }
+    Ok(())
+}
+
+/// A fully built command line. Kept as data so the argument order is testable
+/// without spawning anything.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Invocation {
+    pub program: &'static str,
+    pub args: Vec<String>,
+}
+
+/// Build the command for `systemctl <args> -- <unit>`.
+///
+/// - User units: `systemctl --user <args> -- <unit>`.
+/// - System units as root: `systemctl <args> -- <unit>`.
+/// - System units as a normal user: `sudo -n -- systemctl <args> -- <unit>`.
+///
+/// `--` always precedes the unit, so a name can never be parsed as an option.
+pub fn invocation(
+    args: &[&str],
+    unit: &str,
+    system: bool,
+    is_root: bool,
+) -> Result<Invocation, String> {
+    validate_unit(unit)?;
+    let mut argv: Vec<String> = Vec::new();
+    let program = if system && !is_root {
+        argv.extend(["-n", "--", "systemctl"].map(String::from));
+        "sudo"
     } else {
-        let mut command = Command::new("systemctl");
-        command.arg("--user");
-        command
-    }
+        if !system {
+            argv.push("--user".to_string());
+        }
+        "systemctl"
+    };
+    argv.extend(args.iter().map(|arg| arg.to_string()));
+    argv.push("--".to_string());
+    argv.push(unit.to_string());
+    Ok(Invocation {
+        program,
+        args: argv,
+    })
 }
 
-pub fn is_frozen(unit: &str, system: bool) -> Option<bool> {
-    let output = command_for(system)
-        .args(["show", unit, "-p", "FreezerState", "--value"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim() == "frozen")
+fn current_user_is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
 }
 
-pub fn run_as(action: Action, unit: &str, system: bool) -> Result<String, String> {
-    let mut command = command_for(system);
-    match action {
-        Action::Freeze => {
-            command.arg("freeze");
-        }
-        Action::Thaw => {
-            command.arg("thaw");
-        }
-        Action::Stop => {
-            command.arg("stop");
-        }
-        Action::Start => {
-            command.arg("start");
-        }
-        Action::Kill => {
-            command.arg("kill").arg("--signal=SIGKILL");
-        }
-    }
-    command.arg(unit);
-
-    let mut child = command
+fn spawn_and_wait(invocation: &Invocation, label: &str) -> Result<String, String> {
+    let mut child = Command::new(invocation.program)
+        .args(&invocation.args)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| format!("systemctl: {error}"))?;
+        .map_err(|error| format!("{}: {error}", invocation.program))?;
 
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) => {}
-            Err(error) => return Err(format!("systemctl: {error}")),
+            Err(error) => return Err(format!("{}: {error}", invocation.program)),
         }
-        if started.elapsed() >= Duration::from_secs(8) {
+        if started.elapsed() >= ACTION_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(format!(
-                "systemctl {} timed out",
-                action.label().to_lowercase()
-            ));
+            return Err(format!("systemctl {label} timed out"));
         }
         std::thread::sleep(Duration::from_millis(20));
     };
@@ -134,7 +170,7 @@ pub fn run_as(action: Action, unit: &str, system: bool) -> Result<String, String
         let _ = pipe.read_to_end(&mut stderr);
     }
     if status.success() {
-        Ok(format!("{} {}", action.verb(), unit))
+        Ok(String::new())
     } else {
         let message = one_line(&String::from_utf8_lossy(&stderr));
         if message.is_empty() {
@@ -142,5 +178,111 @@ pub fn run_as(action: Action, unit: &str, system: bool) -> Result<String, String
         } else {
             Err(message)
         }
+    }
+}
+
+pub fn is_frozen(unit: &str, system: bool) -> Option<bool> {
+    let inv = invocation(
+        &["show", "-p", "FreezerState", "--value"],
+        unit,
+        system,
+        current_user_is_root(),
+    )
+    .ok()?;
+    let output = Command::new(inv.program)
+        .args(&inv.args)
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim() == "frozen")
+}
+
+pub fn run_as(action: Action, unit: &str, system: bool) -> Result<String, String> {
+    let inv = invocation(
+        action.systemctl_args(),
+        unit,
+        system,
+        current_user_is_root(),
+    )?;
+    spawn_and_wait(&inv, &action.label().to_lowercase())?;
+    Ok(format!("{} {}", action.verb(), unit))
+}
+
+/// Seam between the guard and the real service manager. The app holds one of
+/// these so guard transitions can be tested with a recording fake.
+pub trait Actuator {
+    fn run(&mut self, action: Action, unit: &str, system: bool) -> Result<String, String>;
+}
+
+pub struct Systemctl;
+
+impl Actuator for Systemctl {
+    fn run(&mut self, action: Action, unit: &str, system: bool) -> Result<String, String> {
+        run_as(action, unit, system)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_unit_uses_user_manager_and_separator() {
+        let inv = invocation(&["stop"], "ollama.service", false, false).unwrap();
+        assert_eq!(inv.program, "systemctl");
+        assert_eq!(inv.args, ["--user", "stop", "--", "ollama.service"]);
+    }
+
+    #[test]
+    fn system_unit_as_root_has_no_user_flag() {
+        let inv = invocation(&["freeze"], "ollama.service", true, true).unwrap();
+        assert_eq!(inv.program, "systemctl");
+        assert_eq!(inv.args, ["freeze", "--", "ollama.service"]);
+    }
+
+    #[test]
+    fn system_unit_as_user_goes_through_non_interactive_sudo() {
+        let inv = invocation(&["kill", "--signal=SIGKILL"], "ollama.service", true, false).unwrap();
+        assert_eq!(inv.program, "sudo");
+        assert_eq!(
+            inv.args,
+            [
+                "-n",
+                "--",
+                "systemctl",
+                "kill",
+                "--signal=SIGKILL",
+                "--",
+                "ollama.service"
+            ]
+        );
+    }
+
+    #[test]
+    fn option_like_and_placeholder_names_are_refused() {
+        assert!(invocation(&["stop"], "--now", false, false).is_err());
+        assert!(invocation(&["stop"], "-", false, false).is_err());
+        assert!(invocation(&["stop"], "kernel", false, false).is_err());
+        assert!(invocation(&["stop"], "", false, false).is_err());
+        assert!(invocation(&["stop"], "a b.service", false, false).is_err());
+        assert!(invocation(&["stop"], "x;rm -rf.service", false, false).is_err());
+        assert!(invocation(&["stop"], "../etc.service", false, false).is_err());
+    }
+
+    #[test]
+    fn escaped_and_scoped_names_are_accepted() {
+        assert!(validate_unit("app-org\\x2ekde\\x2ekonsole-42.scope").is_ok());
+        assert!(validate_unit("user@1000.service").is_ok());
+        assert!(validate_unit("app.slice").is_ok());
+        assert!(validate_unit("docker-0123abcd.scope").is_ok());
+    }
+
+    #[test]
+    fn overlong_name_is_refused() {
+        let long = format!("{}.service", "a".repeat(260));
+        assert!(validate_unit(&long).is_err());
     }
 }

@@ -1,12 +1,15 @@
 mod app;
+mod config;
 mod docker;
 mod gpu;
+mod hints;
 mod proc;
 mod sysd;
 mod ui;
 mod util;
 
 use std::io::{self, IsTerminal};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -17,6 +20,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use app::{App, KeyResult};
+use config::GuardConfig;
 use proc::Monitor;
 
 struct Args {
@@ -25,10 +29,13 @@ struct Args {
     once: bool,
     no_gpu: bool,
     guard: bool,
-    guard_grace: f64,
+    /// Overrides `grace` from the config file when set.
+    guard_grace: Option<f64>,
     guard_targets: Vec<String>,
     allow_system: bool,
     headless_guard: bool,
+    guard_config: Option<PathBuf>,
+    explain_guard: bool,
 }
 
 impl Args {
@@ -39,10 +46,12 @@ impl Args {
             once: false,
             no_gpu: false,
             guard: true,
-            guard_grace: 60.0,
+            guard_grace: None,
             guard_targets: Vec::new(),
             allow_system: false,
             headless_guard: false,
+            guard_config: None,
+            explain_guard: false,
         };
         let mut iter = std::env::args().skip(1);
         while let Some(arg) = iter.next() {
@@ -53,6 +62,7 @@ impl Args {
                 "--no-guard" => args.guard = false,
                 "--allow-system" => args.allow_system = true,
                 "--headless-guard" => args.headless_guard = true,
+                "--explain-guard" => args.explain_guard = true,
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -71,11 +81,15 @@ impl Args {
                 }
                 "--guard-grace" => {
                     let value = iter.next().ok_or_else(|| format!("{arg} needs a value"))?;
-                    args.guard_grace = parse_interval(&value)?;
+                    args.guard_grace = Some(parse_interval(&value)?);
                 }
                 "--guard-target" => {
                     let value = iter.next().ok_or_else(|| format!("{arg} needs a value"))?;
                     push_targets(&mut args.guard_targets, &value);
+                }
+                "--guard-config" => {
+                    let value = iter.next().ok_or_else(|| format!("{arg} needs a value"))?;
+                    args.guard_config = Some(PathBuf::from(value));
                 }
                 other if other.starts_with("--interval=") => {
                     args.interval = parse_interval(&other["--interval=".len()..])?;
@@ -84,10 +98,13 @@ impl Args {
                     args.reserve_mb = parse_reserve(&other["--reserve-mb=".len()..])?;
                 }
                 other if other.starts_with("--guard-grace=") => {
-                    args.guard_grace = parse_interval(&other["--guard-grace=".len()..])?;
+                    args.guard_grace = Some(parse_interval(&other["--guard-grace=".len()..])?);
                 }
                 other if other.starts_with("--guard-target=") => {
                     push_targets(&mut args.guard_targets, &other["--guard-target=".len()..]);
+                }
+                other if other.starts_with("--guard-config=") => {
+                    args.guard_config = Some(PathBuf::from(&other["--guard-config=".len()..]));
                 }
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -124,7 +141,7 @@ fn push_targets(targets: &mut Vec<String>, value: &str) {
 fn print_help() {
     println!(
         "\
-SysLens {version} - lightweight per-unit CPU, RAM and VRAM monitor
+SysLens {version} - lightweight per-unit CPU, RAM and GPU monitor for Linux
 
 USAGE:
   syslens [OPTIONS]
@@ -133,10 +150,12 @@ OPTIONS:
   -i, --interval SECS   screen refresh interval (default 1.0)
       --reserve-mb MB   VRAM kept for the compositor in warnings (default 2048)
       --once            print one plain snapshot and exit
-      --no-gpu          skip nvidia-smi queries
-      --no-guard        disable the automatic freeze/stop guard
-      --guard-grace S   seconds before a frozen unit is stopped (default 60)
+      --no-gpu          skip GPU queries
+      --no-guard        disable the automatic guard for this run
+      --guard-grace S   override the guard grace period (default 60, or the value in guard.conf)
       --guard-target U  only auto-guard this unit (repeatable, comma-separated)
+      --guard-config P  read guard settings from P (default ~/.config/syslens/guard.conf)
+      --explain-guard   print why each unit is or is not guard-eligible, then exit
       --allow-system    allow system model units (needs root or passwordless sudo)
       --headless-guard  run the guard without the TUI (for a systemd service)
   -h, --help            show this help
@@ -154,14 +173,22 @@ KEYS:
   x               show all units / hide idle units
   ?               help      q  quit
 
-Actions only target systemd --user units. The compositor, SysLens' own
-scope, kernel threads, and system units are protected.
+The guard is part of the design and on by default: when VRAM, RAM, swap or
+memory-stall pressure persists it freezes the largest idle model unit, then
+stops it after the grace period, and thaws it when pressure clears. It never
+touches protected units (compositor, desktop, session, kernel, system). Use
+--no-guard to turn it off, --explain-guard to see the gating decision, and
+~/.config/syslens/guard.conf to tune thresholds, hints, allow and deny lists.
+
+GPU memory is read from nvidia-smi when present, otherwise from sysfs VRAM
+counters (amdgpu) and DRM fdinfo, which also attributes per-process VRAM.
 
 Examples:
-  syslens                 live view
-  syslens --once          one-shot snapshot for scripts
-  syslens -i 0.5          refresh twice a second
-  syslens --headless-guard  always-on guard (run under systemd --user)",
+  syslens                      live view
+  syslens --once               one-shot snapshot for scripts
+  syslens --explain-guard      show guard eligibility for every unit
+  syslens -i 0.5               refresh twice a second
+  syslens --headless-guard     always-on guard (run under systemd --user)",
         version = env!("CARGO_PKG_VERSION")
     );
 }
@@ -175,6 +202,21 @@ fn main() {
         }
     };
 
+    let (mut guard_cfg, config_path) = match config::load(args.guard_config.as_deref()) {
+        Ok(loaded) => loaded,
+        Err(message) => {
+            eprintln!("syslens: {message}");
+            std::process::exit(2);
+        }
+    };
+    if let Some(grace) = args.guard_grace {
+        guard_cfg.grace = Duration::from_secs_f64(grace);
+    }
+    if let Err(message) = config::install_hints(&guard_cfg) {
+        eprintln!("syslens: {message}");
+        std::process::exit(2);
+    }
+
     if args.headless_guard {
         if args.once {
             eprintln!("syslens: --headless-guard and --once are mutually exclusive");
@@ -184,12 +226,21 @@ fn main() {
             eprintln!("syslens: --headless-guard requires the guard (remove --no-guard)");
             std::process::exit(2);
         }
-        run_headless_guard(&args);
+        run_headless_guard(&args, guard_cfg);
         return;
     }
 
-    let mut monitor = Monitor::new(args.reserve_mb, !args.no_gpu);
+    let mut monitor = Monitor::new(
+        args.reserve_mb,
+        !args.no_gpu,
+        guard_cfg.gpu_log_pattern.clone(),
+    );
     monitor.warmup();
+
+    if args.explain_guard {
+        print_explain(&args, &mut monitor, guard_cfg, config_path);
+        return;
+    }
 
     if args.once {
         let snapshot = monitor.sample();
@@ -208,7 +259,7 @@ fn main() {
         snapshot,
         args.interval,
         args.guard,
-        args.guard_grace,
+        guard_cfg,
         args.guard_targets,
         args.allow_system,
     );
@@ -219,13 +270,43 @@ fn main() {
     }
 }
 
+fn print_explain(
+    args: &Args,
+    monitor: &mut Monitor,
+    guard_cfg: GuardConfig,
+    config_path: Option<PathBuf>,
+) {
+    match &config_path {
+        Some(path) => println!("guard config: {}", path.display()),
+        None => println!("guard config: built-in defaults (no guard.conf found)"),
+    }
+    println!(
+        "sustain {}s · recover {}s · cooldown {}s · grace {}s · busy_cpu {:.0}% · allow_busy {}\n",
+        guard_cfg.sustain.as_secs(),
+        guard_cfg.recover.as_secs(),
+        guard_cfg.cooldown.as_secs(),
+        guard_cfg.grace.as_secs(),
+        guard_cfg.busy_cpu,
+        guard_cfg.allow_busy
+    );
+    let app = App::new(
+        monitor.sample(),
+        args.interval,
+        args.guard,
+        guard_cfg,
+        args.guard_targets.clone(),
+        args.allow_system,
+    );
+    print!("{}", app.explain_guard_table());
+}
+
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 extern "C" fn stop_handler(_: libc::c_int) {
     RUNNING.store(false, Ordering::Relaxed);
 }
 
-fn run_headless_guard(args: &Args) {
+fn run_headless_guard(args: &Args, guard_cfg: GuardConfig) {
     unsafe {
         libc::signal(
             libc::SIGTERM,
@@ -237,13 +318,17 @@ fn run_headless_guard(args: &Args) {
         );
     }
 
-    let mut monitor = Monitor::new(args.reserve_mb, !args.no_gpu);
+    let mut monitor = Monitor::new(
+        args.reserve_mb,
+        !args.no_gpu,
+        guard_cfg.gpu_log_pattern.clone(),
+    );
     monitor.warmup();
     let mut app = App::new(
         monitor.sample(),
         args.interval,
         true,
-        args.guard_grace,
+        guard_cfg.clone(),
         args.guard_targets.clone(),
         args.allow_system,
     );
@@ -252,10 +337,11 @@ fn run_headless_guard(args: &Args) {
     app.set_snapshot(monitor.sample());
 
     eprintln!(
-        "syslens guard: running (interval {:.1}s, reserve {} MiB, grace {}s{})",
+        "syslens guard: running (interval {:.1}s, reserve {} MiB, grace {}s, sustain {}s{})",
         args.interval,
         args.reserve_mb,
-        args.guard_grace,
+        guard_cfg.grace.as_secs(),
+        guard_cfg.sustain.as_secs(),
         if args.guard_targets.is_empty() {
             String::new()
         } else {

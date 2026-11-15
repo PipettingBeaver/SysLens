@@ -7,93 +7,25 @@ use std::time::{Duration, Instant};
 
 use crate::docker::DockerCache;
 use crate::gpu::{Gpu, GpuCache};
+use crate::hints;
 use crate::util::{clock_now, hostname, human_bytes};
 
 pub const GIB: u64 = 1024 * 1024 * 1024;
 const SMALL_UNIT_BYTES: u64 = 8 * 1024 * 1024;
-const MODEL_HINTS: &[&str] = &[
-    "viitorvoice",
-    "voiceforge",
-    "nounrevoicer",
-    "ollama",
-    "whisper",
-    "tts",
-    "llm",
-    "embed",
-];
-const COMPOSITOR_HINTS: &[&str] = &[
-    "kwin",
-    "gnome-shell",
-    "mutter",
-    "wayland",
-    "xorg",
-    "sddm",
-    "gdm",
-    "greetd",
-];
-const DESKTOP_HINTS: &[&str] = &[
-    "plasma",
-    "xdg-desktop-portal",
-    "kded",
-    "kactivitymanagerd",
-    "powerdevil",
-    "polkit",
-    "kwallet",
-    "ksmserver",
-    "kscreen",
-    "kglobalaccel",
-    "klipper",
-    "kmenuedit",
-];
-const SYSTEM_HINTS: &[&str] = &[
-    "systemd",
-    "journald",
-    "dbus",
-    "pipewire",
-    "wireplumber",
-    "networkmanager",
-    "tailscaled",
-    "syncthing",
-    "docker",
-    "containerd",
-    "podman",
-    "bluetooth",
-    "upower",
-    "rtkit",
-    "gvfs",
-    "udisks",
-    "cups",
-    "avahi",
-    "wpa_supplicant",
-    "modemmanager",
-    "smartd",
-    "sshd",
-    "cron",
-    "at-spi",
-    "dconf",
-    "flatpak-session-helper",
-];
-
 pub fn is_model_unit(unit: &str) -> bool {
-    let lowered = unit.to_lowercase();
-    MODEL_HINTS.iter().any(|hint| lowered.contains(hint))
+    hints::any(unit, &hints::active().model)
 }
 
 pub fn is_compositor_unit(unit: &str) -> bool {
-    let lowered = unit.to_lowercase();
-    COMPOSITOR_HINTS.iter().any(|hint| lowered.contains(hint))
+    hints::any(unit, &hints::active().compositor)
 }
 
 pub fn is_desktop_unit(unit: &str) -> bool {
-    is_compositor_unit(unit) || {
-        let lowered = unit.to_lowercase();
-        DESKTOP_HINTS.iter().any(|hint| lowered.contains(hint))
-    }
+    is_compositor_unit(unit) || hints::any(unit, &hints::active().desktop)
 }
 
 pub fn is_system_unit(unit: &str) -> bool {
-    let lowered = unit.to_lowercase();
-    SYSTEM_HINTS.iter().any(|hint| lowered.contains(hint))
+    hints::any(unit, &hints::active().system)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -275,13 +207,21 @@ pub struct Snapshot {
     pub procs: Vec<ProcRow>,
     pub warnings: Vec<Warning>,
     pub self_unit: String,
-    pub nvkms: Option<usize>,
+    pub gpu_alloc_failures: Option<usize>,
+    pub psi_mem: Option<f64>,
 }
 
-fn spawn_journal_watcher(cell: Arc<Mutex<Option<usize>>>, stop: Arc<AtomicBool>) {
+const DEFAULT_ALLOC_PATTERN: &str =
+    "NVKMS|GEM object|(amdgpu|i915|xe|drm).*(failed to allocate|Cannot allocate memory|ENOMEM)";
+
+fn spawn_alloc_watcher(
+    cell: Arc<Mutex<Option<usize>>>,
+    stop: Arc<AtomicBool>,
+    pattern: Option<String>,
+) {
     std::thread::spawn(move || {
         while !stop.load(Ordering::Relaxed) {
-            let count = journal_nvkms();
+            let count = journal_alloc_failures(pattern.as_deref());
             if let Ok(mut slot) = cell.lock() {
                 *slot = count;
             }
@@ -295,7 +235,13 @@ fn spawn_journal_watcher(cell: Arc<Mutex<Option<usize>>>, stop: Arc<AtomicBool>)
     });
 }
 
-fn journal_nvkms() -> Option<usize> {
+/// Count GPU allocation-failure lines in the current boot's kernel log over
+/// the last 15 minutes. The pattern is configurable so other drivers can be
+/// covered; the default catches NVIDIA NVKMS, GEM allocation failures, and
+/// amdgpu/i915/xe/drm allocation errors. Returns `None` when the journal
+/// cannot be read, which disables this trigger rather than firing it.
+fn journal_alloc_failures(pattern: Option<&str>) -> Option<usize> {
+    let pattern = pattern.unwrap_or(DEFAULT_ALLOC_PATTERN);
     let output = Command::new("journalctl")
         .args([
             "-k",
@@ -303,7 +249,7 @@ fn journal_nvkms() -> Option<usize> {
             "--since",
             "-15 min",
             "-g",
-            "NVKMS",
+            pattern,
             "--no-pager",
             "-o",
             "cat",
@@ -322,6 +268,19 @@ fn journal_nvkms() -> Option<usize> {
     )
 }
 
+/// Memory pressure stall (`some avg10`) from `/proc/pressure/memory`, as a
+/// percentage. `None` when PSI is unavailable or unusable.
+fn read_psi_mem() -> Option<f64> {
+    parse_psi(&fs::read_to_string("/proc/pressure/memory").ok()?)
+}
+
+fn parse_psi(text: &str) -> Option<f64> {
+    let some = text.lines().find(|line| line.starts_with("some"))?;
+    some.split_whitespace()
+        .find_map(|field| field.strip_prefix("avg10="))
+        .and_then(|value| value.parse::<f64>().ok())
+}
+
 pub struct Monitor {
     reserve_mb: u64,
     gpu_enabled: bool,
@@ -334,20 +293,24 @@ pub struct Monitor {
     docker_cache: DockerCache,
     self_unit: String,
     host: String,
-    nvkms: Arc<Mutex<Option<usize>>>,
+    alloc_failures: Arc<Mutex<Option<usize>>>,
     journal_stop: Arc<AtomicBool>,
 }
 
 impl Monitor {
-    pub fn new(reserve_mb: u64, gpu_enabled: bool) -> Self {
+    pub fn new(reserve_mb: u64, gpu_enabled: bool, gpu_log_pattern: Option<String>) -> Self {
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         let page_size = if page > 0 { page as u64 } else { 4096 };
         let ncpu = std::thread::available_parallelism()
             .map(|n| n.get() as u64)
             .unwrap_or(1);
-        let nvkms = Arc::new(Mutex::new(None));
+        let alloc_failures = Arc::new(Mutex::new(None));
         let journal_stop = Arc::new(AtomicBool::new(false));
-        spawn_journal_watcher(nvkms.clone(), journal_stop.clone());
+        spawn_alloc_watcher(
+            alloc_failures.clone(),
+            journal_stop.clone(),
+            gpu_log_pattern.clone(),
+        );
         Self {
             reserve_mb,
             gpu_enabled,
@@ -360,7 +323,7 @@ impl Monitor {
             docker_cache: DockerCache::new(),
             self_unit: String::from("root"),
             host: hostname(),
-            nvkms,
+            alloc_failures,
             journal_stop,
         }
     }
@@ -369,9 +332,14 @@ impl Monitor {
         let _ = self.sample();
         let deadline = Instant::now() + Duration::from_millis(800);
         while Instant::now() < deadline {
-            let nvkms_ready = self.nvkms.lock().ok().and_then(|slot| *slot).is_some();
+            let alloc_ready = self
+                .alloc_failures
+                .lock()
+                .ok()
+                .and_then(|slot| *slot)
+                .is_some();
             let gpu_ready = !self.gpu_enabled || self.gpu_cache.ready();
-            if nvkms_ready && gpu_ready {
+            if alloc_ready && gpu_ready {
                 break;
             }
             std::thread::sleep(Duration::from_millis(25));
@@ -410,7 +378,8 @@ impl Monitor {
         let swap = read_swap();
         let zram = read_zram();
         let load = read_load();
-        let nvkms = self.nvkms.lock().ok().and_then(|slot| *slot);
+        let gpu_alloc_failures = self.alloc_failures.lock().ok().and_then(|slot| *slot);
+        let psi_mem = read_psi_mem();
         let mut warnings = build_warnings(
             &gpu,
             &ram,
@@ -418,7 +387,7 @@ impl Monitor {
             &units,
             gpu_unattributed,
             self.reserve_mb,
-            nvkms,
+            gpu_alloc_failures,
         );
         warnings.sort_by_key(|w| w.level.rank());
 
@@ -438,7 +407,8 @@ impl Monitor {
             procs,
             warnings,
             self_unit,
-            nvkms,
+            gpu_alloc_failures,
+            psi_mem,
         }
     }
 
@@ -864,7 +834,7 @@ fn build_warnings(
     units: &[UnitStat],
     gpu_unattributed: u64,
     reserve_mb: u64,
-    nvkms: Option<usize>,
+    gpu_alloc_failures: Option<usize>,
 ) -> Vec<Warning> {
     let mut warnings = Vec::new();
     let mut add = |level: Level, text: String| warnings.push(Warning { level, text });
@@ -940,12 +910,12 @@ fn build_warnings(
         );
     }
 
-    if let Some(count) = nvkms {
+    if let Some(count) = gpu_alloc_failures {
         if count > 0 {
             add(
                 Level::Warn,
                 format!(
-                    "{count} NVKMS allocation failures in the last 15 min; desktop may flicker"
+                    "{count} GPU allocation failures in the last 15 min; the desktop may flicker or stutter"
                 ),
             );
         }
@@ -1067,6 +1037,14 @@ mod tests {
             ..unit
         };
         assert!(protect_reason(&normal, "app-org.kde.konsole-1.scope").is_none());
+    }
+
+    #[test]
+    fn parses_memory_psi_some_avg10() {
+        let text = "some avg10=12.34 avg60=5.00 avg300=1.00 total=12345\nfull avg10=8.00 avg60=2.00 avg300=0.50 total=999\n";
+        assert_eq!(parse_psi(text), Some(12.34));
+        assert_eq!(parse_psi("full avg10=9.00\n"), None);
+        assert_eq!(parse_psi(""), None);
     }
 
     #[test]

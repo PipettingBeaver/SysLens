@@ -147,26 +147,25 @@ fn draw_cards(frame: &mut Frame, area: Rect, app: &App, narrow: bool) {
                 format!("{}/{}M free {} r{}", gpu.used, gpu.total, gpu.free, reserve),
                 level,
             ));
+            let util = gpu.util.unwrap_or(0);
+            let util_text = text_or_na(gpu.util, "%");
+            let temp_text = text_or_na(gpu.temp, "C");
             cards.push((
                 "GPU / CPU",
-                gpu.util as f64 / 100.0,
+                util as f64 / 100.0,
                 format!(
-                    "GPU {}% {}C · CPU {:.0}% L{:.2}",
-                    gpu.util, gpu.temp, snapshot.cpu_pct, snapshot.load[0]
+                    "GPU {} {} · CPU {:.0}% L{:.2}",
+                    util_text, temp_text, snapshot.cpu_pct, snapshot.load[0]
                 ),
-                if gpu.util < 90 {
-                    Level::Ok
-                } else {
-                    Level::Warn
-                },
+                if util < 90 { Level::Ok } else { Level::Warn },
             ));
         }
         None => {
             cards.push((
                 "GPU VRAM",
                 0.0,
-                "no NVIDIA GPU detected".to_string(),
-                Level::Warn,
+                "no GPU VRAM telemetry".to_string(),
+                Level::Info,
             ));
             cards.push((
                 "CPU / LOAD",
@@ -448,10 +447,10 @@ fn draw_footer(frame: &mut Frame, area: Rect, app: &App, narrow: bool) {
         "j/k select · p processes · Enter actions · s stop · r start · f freeze · t thaw · ! emergency · ? help · q quit"
     };
     let mut spans = Vec::new();
-    if let Some(count) = app.snapshot.nvkms {
+    if let Some(count) = app.snapshot.gpu_alloc_failures {
         if count > 0 {
             spans.push(Span::styled(
-                format!("NVKMS {count}  ·  "),
+                format!("GPU alloc {count}  ·  "),
                 Style::default().fg(Color::Yellow),
             ));
         }
@@ -611,6 +610,13 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
         y: area.y + (area.height - height) / 2,
         width,
         height,
+    }
+}
+
+fn text_or_na(value: Option<u64>, suffix: &str) -> String {
+    match value {
+        Some(value) => format!("{value}{suffix}"),
+        None => "n/a".to_string(),
     }
 }
 
@@ -1003,20 +1009,20 @@ pub fn render_plain(snapshot: &Snapshot, color: bool) -> String {
     out.push('\n');
     match &snapshot.gpu {
         Some(gpu) => out.push_str(&format!(
-            "GPU   {}  VRAM {} / {} MiB (free {}, reserve {})  util {}%  {}C  unaccounted {} MiB\n",
+            "GPU   {}  VRAM {} / {} MiB (free {}, reserve {})  util {}  {}  unaccounted {} MiB\n",
             gpu.name,
             gpu.used,
             gpu.total,
             gpu.free,
             snapshot.reserve_mb,
-            gpu.util,
-            gpu.temp,
+            text_or_na(gpu.util, "%"),
+            text_or_na(gpu.temp, "C"),
             snapshot.gpu_unattributed
         )),
         None => out.push_str("GPU   not detected\n"),
     }
-    if let Some(count) = snapshot.nvkms {
-        out.push_str(&format!("NVKMS failures (15m) {count}\n"));
+    if let Some(count) = snapshot.gpu_alloc_failures {
+        out.push_str(&format!("GPU alloc failures (15m) {count}\n"));
     }
 
     out.push('\n');

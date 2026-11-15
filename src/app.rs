@@ -5,9 +5,13 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+use crate::config::GuardConfig;
 use crate::proc::{self, Level, Snapshot, UnitStat};
-use crate::sysd::{self, Action};
+use crate::sysd::{self, Action, Actuator};
 use crate::util::{self, human_bytes};
+
+mod guard;
+use guard::{Guard, GuardPhase};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StatusKind {
@@ -55,44 +59,6 @@ pub struct Toast {
     pub until: Instant,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Pressure {
-    Normal,
-    Warning,
-    Critical,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Trigger {
-    Vram,
-    Ram,
-    Nvkms,
-}
-
-#[derive(Clone, Debug)]
-enum GuardPhase {
-    Idle,
-    Frozen {
-        unit: String,
-        since: Instant,
-        critical_since: Option<Instant>,
-        system: bool,
-    },
-    Handled {
-        unit: String,
-    },
-    Suppressed,
-}
-
-struct Guard {
-    enabled: bool,
-    grace: Duration,
-    targets: HashSet<String>,
-    phase: GuardPhase,
-    notified_no_candidate: bool,
-    last_nvkms: Option<usize>,
-}
-
 pub struct App {
     pub snapshot: Snapshot,
     pub filtered: Vec<usize>,
@@ -110,6 +76,7 @@ pub struct App {
     pub headless: bool,
     allow_system: bool,
     guard: Guard,
+    actuator: Box<dyn Actuator>,
 }
 
 impl App {
@@ -117,11 +84,11 @@ impl App {
         snapshot: Snapshot,
         interval: f64,
         guard_enabled: bool,
-        grace_secs: f64,
+        guard_cfg: GuardConfig,
         guard_targets: Vec<String>,
         allow_system: bool,
     ) -> Self {
-        let last_nvkms = snapshot.nvkms;
+        let last_alloc = snapshot.gpu_alloc_failures;
         let mut app = Self {
             snapshot,
             filtered: Vec::new(),
@@ -138,14 +105,8 @@ impl App {
             toast: None,
             allow_system,
             headless: false,
-            guard: Guard {
-                enabled: guard_enabled,
-                grace: Duration::from_secs_f64(grace_secs.max(0.0)),
-                targets: guard_targets.into_iter().collect(),
-                phase: GuardPhase::Idle,
-                notified_no_candidate: false,
-                last_nvkms,
-            },
+            guard: Guard::new(guard_enabled, guard_cfg, guard_targets, last_alloc),
+            actuator: Box::new(sysd::Systemctl),
         };
         app.rebuild_filtered(None);
         app
@@ -229,7 +190,7 @@ impl App {
         {
             self.toast = None;
         }
-        self.evaluate_guard();
+        self.evaluate_guard(now);
     }
 
     pub fn selected_unit(&self) -> Option<&UnitStat> {
@@ -272,18 +233,14 @@ impl App {
         }
         match &self.guard.phase {
             GuardPhase::Idle => "guard on".to_string(),
-            GuardPhase::Frozen {
-                unit,
-                since,
-                critical_since,
-                ..
-            } => {
+            GuardPhase::Frozen { unit, since, .. } => {
                 let frozen_for = since.elapsed().as_secs();
                 let name = short_name(unit);
-                match critical_since {
+                match self.guard.critical_since {
                     Some(critical) => {
                         let left = self
                             .guard
+                            .cfg
                             .grace
                             .saturating_sub(critical.elapsed())
                             .as_secs();
@@ -391,7 +348,7 @@ impl App {
             .snapshot
             .units
             .iter()
-            .filter(|unit| proc::is_model_unit(&unit.unit))
+            .filter(|unit| self.is_model(&unit.unit))
             .filter(|unit| unit.user || self.allow_system)
             .cloned()
             .collect();
@@ -439,289 +396,12 @@ impl App {
         desktop_notify(level, message);
     }
 
-    fn assess(&self, nvkms_new: bool) -> (Pressure, Trigger, Vec<String>) {
-        let snapshot = &self.snapshot;
-        let mut level = Pressure::Normal;
-        let mut trigger = Trigger::Vram;
-        let mut reasons = Vec::new();
-        let mut ram_critical = false;
-        let mut ram_pressure = false;
-        let mut gpu_pressure = false;
-
-        if let Some(gpu) = &snapshot.gpu {
-            if gpu.free < snapshot.reserve_mb {
-                level = Pressure::Critical;
-                trigger = Trigger::Vram;
-                gpu_pressure = true;
-                reasons.push(format!(
-                    "VRAM free {} MiB < reserve {} MiB",
-                    gpu.free, snapshot.reserve_mb
-                ));
-            } else if gpu.free < snapshot.reserve_mb * 3 / 2 {
-                level = level.max(Pressure::Warning);
-                trigger = Trigger::Vram;
-                gpu_pressure = true;
-                reasons.push(format!(
-                    "VRAM free {} MiB near reserve {} MiB",
-                    gpu.free, snapshot.reserve_mb
-                ));
-            }
-        }
-
-        if snapshot.ram.available < 1536 * 1024 * 1024 {
-            level = Pressure::Critical;
-            ram_critical = true;
-            ram_pressure = true;
-            reasons.push(format!(
-                "RAM available {} (zram-only swap)",
-                human_bytes(snapshot.ram.available)
-            ));
-        } else if snapshot.ram.available < 3 * proc::GIB {
-            level = level.max(Pressure::Warning);
-            ram_pressure = true;
-            reasons.push(format!(
-                "low RAM: {} available",
-                human_bytes(snapshot.ram.available)
-            ));
-        }
-
-        if snapshot.swap.total > 0 && snapshot.swap.percent >= 85.0 {
-            level = Pressure::Critical;
-            ram_critical = true;
-            ram_pressure = true;
-            reasons.push(format!("swap {:.0}% used", snapshot.swap.percent));
-        } else if snapshot.swap.total > 0 && snapshot.swap.percent >= 70.0 {
-            level = level.max(Pressure::Warning);
-            ram_pressure = true;
-            reasons.push(format!("swap {:.0}% used", snapshot.swap.percent));
-        }
-
-        if nvkms_new {
-            level = Pressure::Critical;
-            trigger = Trigger::Nvkms;
-            reasons.push(match snapshot.nvkms {
-                Some(count) => format!("{count} NVKMS failures in 15 min (new)"),
-                None => "new NVKMS failures".to_string(),
-            });
-        }
-
-        if ram_critical || (!gpu_pressure && ram_pressure) {
-            trigger = Trigger::Ram;
-        }
-        (level, trigger, reasons)
-    }
-
-    fn guard_candidate(&self, trigger: Trigger) -> Option<UnitStat> {
-        let candidates: Vec<&UnitStat> = self
-            .snapshot
-            .units
-            .iter()
-            .filter(|unit| (unit.user || self.allow_system) && proc::is_model_unit(&unit.unit))
-            .filter(|unit| !unit.stopped && !unit.frozen)
-            .filter(|unit| self.guard.targets.is_empty() || self.guard.targets.contains(&unit.unit))
-            .filter(|unit| self.protection(unit).is_none())
-            .filter(|unit| match trigger {
-                Trigger::Ram => unit.rss >= 512 * 1024 * 1024 || unit.vram >= 1024,
-                _ => unit.vram >= 512,
-            })
-            .collect();
-
-        match trigger {
-            Trigger::Ram => candidates
-                .into_iter()
-                .max_by_key(|unit| (unit.rss, unit.vram)),
-            _ => candidates
-                .into_iter()
-                .max_by_key(|unit| (unit.vram, unit.rss)),
-        }
-        .cloned()
-    }
-
-    fn evaluate_guard(&mut self) {
-        if !self.guard.enabled {
-            self.guard.phase = GuardPhase::Idle;
-            return;
-        }
-
-        let nvkms_new = match self.snapshot.nvkms {
-            Some(count) => {
-                let is_new = self
-                    .guard
-                    .last_nvkms
-                    .map(|old| count > old)
-                    .unwrap_or(false);
-                self.guard.last_nvkms = Some(count);
-                is_new
-            }
-            None => false,
-        };
-
-        let (level, trigger, reasons) = self.assess(nvkms_new);
-        let now = Instant::now();
-
-        if level == Pressure::Normal {
-            self.guard.notified_no_candidate = false;
-            match &mut self.guard.phase {
-                GuardPhase::Frozen { critical_since, .. } => *critical_since = None,
-                GuardPhase::Handled { .. } | GuardPhase::Suppressed => {
-                    self.guard.phase = GuardPhase::Idle;
-                }
-                GuardPhase::Idle => {}
-            }
-            return;
-        }
-
-        match self.guard.phase.clone() {
-            GuardPhase::Idle => {
-                if let Some(candidate) = self.guard_candidate(trigger) {
-                    let reason = reasons.join("; ");
-                    match sysd::run_as(Action::Freeze, &candidate.unit, !candidate.user) {
-                        Ok(_) => {
-                            self.frozen.insert(candidate.unit.clone());
-                            self.apply_frozen_flag(&candidate.unit, true);
-                            self.guard.phase = GuardPhase::Frozen {
-                                unit: candidate.unit.clone(),
-                                since: now,
-                                critical_since: (level == Pressure::Critical).then_some(now),
-                                system: !candidate.user,
-                            };
-                            let text = format!(
-                                "{reason}. Froze {} ({}); will stop it after {}s if pressure persists. Thaw with t to cancel.",
-                                candidate.unit,
-                                usage_desc(&candidate),
-                                self.guard.grace.as_secs()
-                            );
-                            self.notify(
-                                if level == Pressure::Critical {
-                                    Level::Crit
-                                } else {
-                                    Level::Warn
-                                },
-                                text,
-                            );
-                            self.set_status(
-                                StatusKind::Info,
-                                format!("guard froze {}", candidate.unit),
-                            );
-                        }
-                        Err(error) => {
-                            self.guard.phase = GuardPhase::Suppressed;
-                            let text =
-                                format!("guard freeze failed for {}: {error}", candidate.unit);
-                            self.notify(Level::Warn, text.clone());
-                            self.set_status(StatusKind::Err, text);
-                        }
-                    }
-                } else if level == Pressure::Critical && !self.guard.notified_no_candidate {
-                    self.guard.notified_no_candidate = true;
-                    let reason = reasons.join("; ");
-                    self.notify(
-                        Level::Warn,
-                        format!("{reason}; no eligible model unit to freeze (system units need --allow-system)"),
-                    );
-                }
-            }
-            GuardPhase::Frozen {
-                unit,
-                since,
-                mut critical_since,
-                system,
-            } => {
-                let active = self
-                    .snapshot
-                    .units
-                    .iter()
-                    .any(|row| row.unit == unit && !row.stopped);
-                if !active {
-                    self.guard.phase = GuardPhase::Handled { unit };
-                    return;
-                }
-                if !self.frozen.contains(&unit) {
-                    self.guard.phase = GuardPhase::Suppressed;
-                    return;
-                }
-
-                if level == Pressure::Critical {
-                    let critical = *critical_since.get_or_insert(now);
-                    if now.duration_since(critical) >= self.guard.grace {
-                        let row = self.find_unit(&unit).cloned();
-                        let result = match &row {
-                            Some(row) => Self::run_action(Action::Stop, row),
-                            None => sysd::run_as(Action::Stop, &unit, system),
-                        };
-                        match result {
-                            Ok(_) => {
-                                self.frozen.remove(&unit);
-                                self.apply_frozen_flag(&unit, false);
-                                if let Some(mut placeholder) = row {
-                                    placeholder.procs = 0;
-                                    placeholder.rss = 0;
-                                    placeholder.vram = 0;
-                                    placeholder.cpu = 0.0;
-                                    placeholder.stopped = true;
-                                    placeholder.frozen = false;
-                                    self.stopped.insert(unit.clone(), placeholder);
-                                    self.stopped_since.insert(unit.clone(), Instant::now());
-                                }
-                                self.guard.phase = GuardPhase::Handled { unit: unit.clone() };
-                                let text = format!(
-                                    "{}. Stopped {unit} to free resources.",
-                                    reasons.join("; ")
-                                );
-                                self.notify(Level::Crit, text);
-                                self.set_status(StatusKind::Ok, format!("guard stopped {unit}"));
-                            }
-                            Err(error) => {
-                                self.guard.phase = GuardPhase::Suppressed;
-                                let text = format!("guard stop failed for {unit}: {error}");
-                                self.notify(Level::Crit, text.clone());
-                                self.set_status(StatusKind::Err, text);
-                            }
-                        }
-                        return;
-                    }
-                } else {
-                    critical_since = None;
-                }
-
-                self.guard.phase = GuardPhase::Frozen {
-                    unit,
-                    since,
-                    critical_since,
-                    system,
-                };
-            }
-            GuardPhase::Handled { .. } | GuardPhase::Suppressed => {}
-        }
-    }
-
-    fn run_action(action: Action, row: &UnitStat) -> Result<String, String> {
-        let system = !row.user;
-        match sysd::run_as(action, &row.unit, system) {
-            Ok(message) => Ok(message),
-            Err(error)
-                if matches!(action, Action::Stop | Action::Kill)
-                    && error.to_lowercase().contains("frozen") =>
-            {
-                sysd::run_as(Action::Thaw, &row.unit, system)?;
-                match sysd::run_as(action, &row.unit, system) {
-                    Ok(message) => Ok(message),
-                    Err(error) => {
-                        let _ = sysd::run_as(Action::Freeze, &row.unit, system);
-                        Err(error)
-                    }
-                }
-            }
-            Err(error) => Err(error),
-        }
-    }
-
     fn model_units(&self, include_frozen: bool) -> Vec<UnitStat> {
         self.snapshot
             .units
             .iter()
             .filter(|unit| {
-                (unit.user || self.allow_system) && proc::is_model_unit(&unit.unit) && !unit.stopped
+                (unit.user || self.allow_system) && self.is_model(&unit.unit) && !unit.stopped
             })
             .filter(|unit| include_frozen || !unit.frozen)
             .filter(|unit| self.protection(unit).is_none())
@@ -734,66 +414,11 @@ impl App {
             .units
             .iter()
             .filter(|unit| {
-                (unit.user || self.allow_system) && proc::is_model_unit(&unit.unit) && !unit.stopped
+                (unit.user || self.allow_system) && self.is_model(&unit.unit) && !unit.stopped
             })
             .filter(|unit| self.protection(unit).is_none())
             .max_by_key(|unit| (unit.vram, unit.rss))
             .cloned()
-    }
-
-    fn note_success(&mut self, action: Action, row: &UnitStat) {
-        let is_model = proc::is_model_unit(&row.unit);
-        match action {
-            Action::Freeze => {
-                self.frozen.insert(row.unit.clone());
-                self.apply_frozen_flag(&row.unit, true);
-                if is_model {
-                    self.guard.phase = GuardPhase::Suppressed;
-                }
-            }
-            Action::Thaw => {
-                self.frozen.remove(&row.unit);
-                self.apply_frozen_flag(&row.unit, false);
-                if is_model {
-                    self.guard.phase = GuardPhase::Suppressed;
-                }
-            }
-            Action::Stop | Action::Kill => {
-                self.frozen.remove(&row.unit);
-                self.apply_frozen_flag(&row.unit, false);
-                let mut placeholder = row.clone();
-                placeholder.procs = 0;
-                placeholder.rss = 0;
-                placeholder.vram = 0;
-                placeholder.cpu = 0.0;
-                placeholder.stopped = true;
-                placeholder.frozen = false;
-                self.stopped.insert(row.unit.clone(), placeholder);
-                self.stopped_since.insert(row.unit.clone(), Instant::now());
-                if is_model {
-                    if let GuardPhase::Frozen { unit, .. } = &self.guard.phase {
-                        if unit == &row.unit {
-                            self.guard.phase = GuardPhase::Handled {
-                                unit: row.unit.clone(),
-                            };
-                        } else {
-                            self.guard.phase = GuardPhase::Suppressed;
-                        }
-                    } else {
-                        self.guard.phase = GuardPhase::Suppressed;
-                    }
-                }
-            }
-            Action::Start => {
-                self.frozen.remove(&row.unit);
-                self.apply_frozen_flag(&row.unit, false);
-                self.stopped.remove(&row.unit);
-                self.stopped_since.remove(&row.unit);
-                if is_model {
-                    self.guard.phase = GuardPhase::Suppressed;
-                }
-            }
-        }
     }
 
     pub fn on_key(&mut self, key: KeyEvent) -> KeyResult {
@@ -1112,7 +737,7 @@ impl App {
             5 => self.freeze_all(),
             6 => {
                 self.guard.enabled = !self.guard.enabled;
-                self.guard.phase = GuardPhase::Idle;
+                self.guard.reset();
                 self.set_status(
                     StatusKind::Info,
                     if self.guard.enabled {
@@ -1252,7 +877,7 @@ impl App {
             return KeyResult::Continue;
         }
 
-        match Self::run_action(action, &row) {
+        match self.run_action(action, &row) {
             Ok(message) => {
                 self.note_success(action, &row);
                 self.set_status(StatusKind::Ok, message);
@@ -1277,7 +902,7 @@ impl App {
                 failures.push(format!("{}: {reason}", row.unit));
                 continue;
             }
-            match Self::run_action(action, &row) {
+            match self.run_action(action, &row) {
                 Ok(_) => {
                     self.note_success(action, &row);
                     ok += 1;
@@ -1379,14 +1004,9 @@ fn usage_desc(unit: &UnitStat) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::GuardConfig;
     use crate::gpu::Gpu;
-    use crate::proc::{Mem, Swap};
-
-    fn system_unit(name: &str, vram: u64, rss: u64) -> UnitStat {
-        let mut row = unit(name, vram, rss);
-        row.user = false;
-        row
-    }
+    use crate::proc::{Mem, Swap, GIB};
 
     fn unit(name: &str, vram: u64, rss: u64) -> UnitStat {
         UnitStat {
@@ -1403,12 +1023,7 @@ mod tests {
         }
     }
 
-    fn snapshot(
-        free_mib: u64,
-        available: u64,
-        swap_percent: f64,
-        units: Vec<UnitStat>,
-    ) -> Snapshot {
+    fn snapshot(free_mib: u64, available: u64, units: Vec<UnitStat>) -> Snapshot {
         Snapshot {
             clock: "00:00:00".into(),
             host: "test".into(),
@@ -1416,15 +1031,15 @@ mod tests {
             load: [0.0; 3],
             ncpu: 8,
             ram: Mem {
-                total: 16 * proc::GIB,
-                used: 16 * proc::GIB - available,
+                total: 16 * GIB,
+                used: 16 * GIB - available,
                 available,
                 percent: 0.0,
             },
             swap: Swap {
-                total: 8 * proc::GIB,
+                total: 8 * GIB,
                 used: 0,
-                percent: swap_percent,
+                percent: 0.0,
             },
             zram: None,
             gpu: Some(Gpu {
@@ -1432,8 +1047,8 @@ mod tests {
                 total: 12288,
                 used: 12288 - free_mib,
                 free: free_mib,
-                util: 0,
-                temp: 40,
+                util: Some(0),
+                temp: Some(40),
             }),
             gpu_unattributed: 0,
             reserve_mb: 2048,
@@ -1441,156 +1056,22 @@ mod tests {
             procs: Vec::new(),
             warnings: Vec::new(),
             self_unit: "app-test.scope".into(),
-            nvkms: Some(0),
+            gpu_alloc_failures: Some(0),
+            psi_mem: None,
         }
     }
 
-    #[test]
-    fn pressure_escalates_on_vram_ram_and_nvkms() {
-        let app = App::new(
-            snapshot(1500, 8 * proc::GIB, 0.0, vec![]),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let (level, trigger, _) = app.assess(false);
-        assert_eq!(level, Pressure::Critical);
-        assert_eq!(trigger, Trigger::Vram);
-
-        let app = App::new(
-            snapshot(2500, 8 * proc::GIB, 0.0, vec![]),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let (level, trigger, _) = app.assess(false);
-        assert_eq!(level, Pressure::Warning);
-        assert_eq!(trigger, Trigger::Vram);
-
-        let app = App::new(
-            snapshot(8000, proc::GIB, 0.0, vec![]),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let (level, trigger, _) = app.assess(false);
-        assert_eq!(level, Pressure::Critical);
-        assert_eq!(trigger, Trigger::Ram);
-
-        let app = App::new(
-            snapshot(8000, 8 * proc::GIB, 0.0, vec![]),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let (level, trigger, _) = app.assess(true);
-        assert_eq!(level, Pressure::Critical);
-        assert_eq!(trigger, Trigger::Nvkms);
-    }
-
-    #[test]
-    fn guard_prefers_largest_model_and_skips_protected_units() {
-        let units = vec![
-            unit("ollama.service", 3000, 100),
-            unit("viitorvoice.service", 5000, 200),
-            unit("plasma-plasmashell.service", 9000, 9000),
-            unit("docker.service", 9000, 9000),
-        ];
-        let app = App::new(
-            snapshot(1000, 8 * proc::GIB, 0.0, units),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let candidate = app.guard_candidate(Trigger::Vram).expect("candidate");
-        assert_eq!(candidate.unit, "viitorvoice.service");
-
-        let app = App::new(
-            snapshot(
-                8000,
-                8 * proc::GIB,
-                0.0,
-                vec![
-                    unit("ollama.service", 0, 2 * proc::GIB),
-                    unit("voiceforge.service", 0, 3 * proc::GIB),
-                ],
-            ),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let candidate = app.guard_candidate(Trigger::Ram).expect("candidate");
-        assert_eq!(candidate.unit, "voiceforge.service");
-    }
-
-    #[test]
-    fn system_model_units_are_only_guardable_with_allow_system() {
-        let units = vec![system_unit("ollama.service", 5000, 100)];
-        let app = App::new(
-            snapshot(1000, 8 * proc::GIB, 0.0, units.clone()),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        assert!(app.guard_candidate(Trigger::Vram).is_none());
-
-        let app = App::new(
-            snapshot(1000, 8 * proc::GIB, 0.0, units),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            true,
-        );
-        let candidate = app.guard_candidate(Trigger::Vram).expect("candidate");
-        assert_eq!(candidate.unit, "ollama.service");
-    }
-
-    #[test]
-    fn frozen_units_are_not_candidates() {
-        let mut frozen = unit("viitorvoice.service", 5000, 200);
-        frozen.frozen = true;
-        let units = vec![frozen, unit("ollama.service", 3000, 100)];
-        let app = App::new(
-            snapshot(1000, 8 * proc::GIB, 0.0, units),
-            1.0,
-            true,
-            60.0,
-            vec![],
-            false,
-        );
-        let candidate = app.guard_candidate(Trigger::Vram).expect("candidate");
-        assert_eq!(candidate.unit, "ollama.service");
+    fn app(snap: Snapshot, guard: bool) -> App {
+        App::new(snap, 1.0, guard, GuardConfig::default(), vec![], false)
     }
 
     #[test]
     fn stopped_placeholder_survives_drain_but_drops_after_external_restart() {
         let row = unit("ollama.service", 0, 0);
-        let mut app = App::new(
-            snapshot(8000, 8 * proc::GIB, 0.0, vec![]),
-            1.0,
-            false,
-            60.0,
-            vec![],
-            false,
-        );
+        let mut app = app(snapshot(8000, 8 * GIB, vec![]), false);
         app.stopped.insert(row.unit.clone(), row.clone());
         app.stopped_since.insert(row.unit.clone(), Instant::now());
-        app.set_snapshot(snapshot(8000, 8 * proc::GIB, 0.0, vec![row.clone()]));
+        app.set_snapshot(snapshot(8000, 8 * GIB, vec![row.clone()]));
         assert!(
             app.stopped.contains_key("ollama.service"),
             "placeholder should survive the drain window"
@@ -1600,7 +1081,7 @@ mod tests {
             row.unit.clone(),
             Instant::now() - STOP_DRAIN_GRACE - Duration::from_secs(1),
         );
-        app.set_snapshot(snapshot(8000, 8 * proc::GIB, 0.0, vec![row.clone()]));
+        app.set_snapshot(snapshot(8000, 8 * GIB, vec![row.clone()]));
         assert!(
             !app.stopped.contains_key("ollama.service"),
             "an externally restarted unit must not resurrect as STOPPED"
@@ -1611,17 +1092,10 @@ mod tests {
     fn stopped_placeholder_is_injected_when_unit_is_gone() {
         let mut row = unit("ollama.service", 0, 0);
         row.stopped = true;
-        let mut app = App::new(
-            snapshot(8000, 8 * proc::GIB, 0.0, vec![]),
-            1.0,
-            false,
-            60.0,
-            vec![],
-            false,
-        );
+        let mut app = app(snapshot(8000, 8 * GIB, vec![]), false);
         app.stopped.insert(row.unit.clone(), row.clone());
         app.stopped_since.insert(row.unit.clone(), Instant::now());
-        app.set_snapshot(snapshot(8000, 8 * proc::GIB, 0.0, vec![]));
+        app.set_snapshot(snapshot(8000, 8 * GIB, vec![]));
         assert!(app.find_unit("ollama.service").is_some());
         assert!(app.find_unit("ollama.service").unwrap().stopped);
     }
