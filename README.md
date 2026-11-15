@@ -9,10 +9,11 @@ desktop): it shows which *unit* owns the VRAM, warns before the compositor runs
 out, and can automatically freeze the largest model backend before the desktop
 starts flickering.
 
-![SysLens snapshot](docs/snapshot.txt)
+<img width="1630" height="1053" alt="image" src="https://github.com/user-attachments/assets/aff491a5-62a7-431a-8f88-ab7adfbc7f36" />
 
 ## Why
 
+This was made specifically for helping monitor stuff all in one place for multiple projects at once on limited hardware.
 Existing monitors show per-process numbers. On a systemd desktop the useful unit
 is the *service or app scope*, and the useful action is `systemctl freeze` /
 `stop` on that unit. SysLens groups processes by cgroup, attributes `nvidia-smi`
@@ -137,7 +138,7 @@ stop command: `systemctl --user disable --now syslens-guard.service`.
 
 ## Limitations
 
-- Linux only; cgroup v2 is assumed for unit resolution.
+- Linux only; cgroup v2 is assumed for unit resolution. On Windows you can try Process Explorer
 - Reads the kernel journal; the guard's NVKMS check is skipped if the service
   user cannot read it.
 - Docker container names need access to the Docker socket; otherwise the
